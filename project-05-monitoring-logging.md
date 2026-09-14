@@ -56,6 +56,8 @@ Deploy a monitoring and logging stack on RHEL that collects metrics via Promethe
   - `node_exporter-1.x.x.linux-amd64.tar.gz`
   - `grafana-x.x.x.linux-amd64.tar.gz`
 
+> **⚠️ No Prism Admin?** See [NO-PRISM-ADMIN.md](NO-PRISM-ADMIN.md) § Project 5 — runs as-is on the flat network. Includes offline Grafana dashboard provisioning and browser-free validation commands.
+
 > **Air-gapped staging tip:** Download tarballs on a machine with internet, copy to the Nutanix cluster via Prism's "Upload File" feature or attach an ISO with the files.
 
 ---

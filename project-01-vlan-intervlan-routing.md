@@ -62,6 +62,8 @@ Build a 3-VLAN network in Nutanix with two RHEL VMs acting as routers, enabling 
 - [ ] 5 VMs created from RHEL ISO (2 routers, 3 end hosts)
 - [ ] Each VM has console access via Prism
 
+> **⚠️ No Prism Admin?** See [NO-PRISM-ADMIN.md](NO-PRISM-ADMIN.md) § Project 1 — run the entire lab on a flat network using secondary IP subnets instead of VLANs. All routing/ACL skills still covered.
+
 ---
 
 ## Step 1: Create Nutanix Networks

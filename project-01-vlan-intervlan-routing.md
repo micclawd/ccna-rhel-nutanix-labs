@@ -1,338 +1,318 @@
-# Project 1: VLAN-Isolated Multi-Site Network with RHEL Routers
+# Project 1: Inter-Subnet Routing & ACLs with a RHEL Router
+
+**No Prism admin required.** Runs on your existing VMs, on your existing flat network.
 
 ## Goal
 
-Build a 3-VLAN network in Nutanix with two RHEL VMs acting as routers, enabling inter-VLAN routing while enforcing ACL-based segmentation.
+Turn one RHEL VM into a router serving three isolated subnets (Users / Servers / DMZ), route traffic between them, and enforce ACL-style segmentation with firewalld — the exact mental model of a Cisco router-on-a-stick with ACLs.
 
 ## Skills Covered
 
 | CCNA | RHEL |
 |------|------|
-| VLANs & 802.1Q trunking | NetworkManager (nmcli/nmtui) |
-| Inter-VLAN routing | firewall-cmd (zones, rich rules) |
-| Static routing | sysctl (net.ipv4.ip_forward) |
-| Standard & Extended ACLs | Network interface configuration |
+| Subnetting & broadcast domains | NetworkManager secondary IPs (`+ipv4.addresses`) |
+| Router-on-a-stick / inter-VLAN routing | `sysctl net.ipv4.ip_forward` |
+| Static routes | NetworkManager `+ipv4.routes` |
+| Standard & extended ACLs | `firewalld` zones + rich rules with priorities |
+| `show ip route` / `traceroute` verification | `ip route`, `tracepath`, `tcpdump` |
 
 ---
 
-## Topology
+## How It Works Without VLANs
+
+You can't create Nutanix VLAN networks, so instead each "VLAN" is a **separate IP subnet stacked onto the same physical wire**. Your router VM holds the gateway address for all three subnets on its single vNIC; hosts point at the router for foreign subnets. Traffic hairpins through the router — which is **identical routing behavior to inter-VLAN routing**. You lose L2 broadcast isolation (a switch-side skill), and keep every routing/ACL skill.
 
 ```
-                    Nutanix AHV Cluster
-    ┌─────────────────────────────────────────────────┐
-    │                                                 │
-    │   VLAN10 (Users)    VLAN20 (Servers)  VLAN30 (DMZ) │
-    │   192.168.10.0/24   192.168.20.0/24   192.168.30.0/24 │
-    │        │                 │                │      │
-    │        │                 │                │      │
-    │   ┌────┴────┐       ┌────┴────┐      ┌────┴────┐ │
-    │   │  USER01 │       │  SVR01  │      │  DMZ01  │ │
-    │   │ .10.10  │       │ .20.10  │      │ .30.10  │ │
-    │   └────┬────┘       └────┬────┘      └────┬────┘ │
-    │        │                 │                │      │
-    │        └─────────────────┼────────────────┘      │
-    │                          │                       │
-    │                    ┌─────┴─────┐                 │
-    │                    │    R1     │                 │
-    │                    │  Router   │                 │
-    │                    │ .10.1     │                 │
-    │                    │ .20.1     │                 │
-    │                    │ .30.1     │                 │
-    │                    └─────┬─────┘                 │
-    │                          │                       │
-    │                    ┌─────┴─────┐                 │
-    │                    │    R2     │                 │
-    │                    │  Router   │                 │
-    │                    │ .10.254   │                 │
-    │                    │ .20.254   │                 │
-    │                    │ .30.254   │                 │
-    │                    └───────────┘                 │
-    │                                                 │
-    └─────────────────────────────────────────────────┘
+              Existing flat network (one wire)
+    ┌───────────────────────────────────────────────────┐
+    │                                                   │
+    │   "Users" 192.168.10.0/24   (secondary IPs)       │
+    │   "Servers" 192.168.20.0/24                       │
+    │   "DMZ"    192.168.30.0/24                        │
+    │                                                   │
+    │   ┌────────┐    ┌────────┐    ┌────────┐          │
+    │   │ USER01 │    │ SVR01  │    │ DMZ01  │          │
+    │   │ .10.10 │    │ .20.10 │    │ .30.10 │          │
+    │   └───┬────┘    └───┬────┘    └───┬────┘          │
+    │       │             │             │               │
+    │       └─────────────┼─────────────┘               │
+    │                     │ (all hairpin via R1)        │
+    │               ┌─────┴──────┐                      │
+    │               │     R1     │                      │
+    │               │ .10.1      │                      │
+    │               │ .20.1      │  (all on one vNIC)   │
+    │               │ .30.1      │                      │
+    │               └────────────┘                      │
+    └───────────────────────────────────────────────────┘
 ```
-
-**Note:** R1 and R2 are connected via a **transit network** (VLAN99, 10.0.99.0/30) for static route exchange. In a real CCNA lab this would be a serial link or Ethernet between routers.
 
 ---
 
 ## Prerequisites
 
-- [ ] Nutanix Prism access
-- [ ] RHEL 9.x ISO uploaded to Prism > Images
-- [ ] 5 VMs created from RHEL ISO (2 routers, 3 end hosts)
-- [ ] Each VM has console access via Prism
+- [ ] 4 existing RHEL VMs (R1, USER01, SVR01, DMZ01) — or 2 VMs minimum (R1 + one host; add others later)
+- [ ] sudo on all of them
+- [ ] Your flat network does **not** already use 192.168.10.0/24, 192.168.20.0/24, or 192.168.30.0/24 — if it does, substitute e.g. 10.10.0.0/24, 10.20.0.0/24, 10.30.0.0/24 everywhere below
+- [ ] Firewalld running: `systemctl status firewalld`
 
 ---
 
-## Step 1: Create Nutanix Networks
-
-In **Prism > Network > Network Config**, create these networks:
-
-| Network Name | VLAN ID | Subnet | Gateway (Nutanix) |
-|-------------|---------|--------|-------------------|
-| VLAN10-Users | 10 | 192.168.10.0/24 | 192.168.10.1 |
-| VLAN20-Servers | 20 | 192.168.20.0/24 | 192.168.20.1 |
-| VLAN30-DMZ | 30 | 192.168.30.0/24 | 192.168.30.1 |
-| VLAN99-Transit | 99 | 10.0.99.0/30 | 10.0.99.1 |
-
-> **Important:** In Nutanix AHV, the "Gateway" you configure is the IP that Nutanix itself responds on. For our lab, we'll override this with static IPs on the RHEL routers.
-
----
-
-## Step 2: Configure RHEL Router 1 (R1)
-
-### 2.1 Assign IP Addresses
-
-R1 has **4 vNICs**: one on each VLAN (10, 20, 30) and one on VLAN99 (transit to R2).
+## Step 1: Discover Your Environment (every VM)
 
 ```bash
-# Check interface names
-ip link show
+DEV=$(ip route show default | awk '{print $5; exit}')
+echo "$DEV"
+# Expected: your NIC name, e.g. ens3 / eth0 / enp1s0
 
-# Expected output: ens3, ens4, ens5, ens6 (or similar)
+nmcli -f NAME,DEVICE con show --active
+# Note the NAME on your device — this is <flat-con>
 
-# Configure VLAN10 interface
-sudo nmcli con add type ethernet ifname ens3 con-name vlan10 \
-    ipv4.method manual ipv4.addresses 192.168.10.1/24 \
-    ipv4.gateway "" ipv4.dns ""
+FLAT_IP=$(ip -4 -o addr show dev "$DEV" scope global | awk 'NR==1{print $4}')
+FLAT_GW=$(ip route show default | awk '{print $3; exit}')
+EXISTING_DNS=$(nmcli -f IP4.DNS dev show "$DEV" | awk '{print $2}' | paste -sd,)
+echo "$FLAT_IP  via  $FLAT_GW  dns=$EXISTING_DNS"
+# Expected: your current IP/CIDR, gateway, DNS — SAVE THESE, Step 2 reapplies them
+```
 
-# Configure VLAN20 interface
-sudo nmcli con add type ethernet ifname ens4 con-name vlan20 \
-    ipv4.method manual ipv4.addresses 192.168.20.1/24 \
-    ipv4.gateway "" ipv4.dns ""
+---
 
-# Configure VLAN30 interface
-sudo nmcli con add type ethernet ifname ens5 con-name vlan30 \
-    ipv4.method manual ipv4.addresses 192.168.30.1/24 \
-    ipv4.gateway "" ipv4.dns ""
+## Step 2: Configure the Router (R1)
 
-# Configure VLAN99 transit interface
-sudo nmcli con add type ethernet ifname ens6 con-name vlan99 \
-    ipv4.method manual ipv4.addresses 10.0.99.1/30 \
-    ipv4.gateway "" ipv4.dns ""
+### 2.1 Stack the Three Subnet Gateways on the Existing NIC
 
-# Bring all up
-sudo nmcli con up vlan10
-sudo nmcli con up vlan20
-sudo nmcli con up vlan30
-sudo nmcli con up vlan99
+We convert the connection from DHCP to manual, keeping the flat IP (management) and adding the three lab gateways:
+
+```bash
+sudo nmcli con mod "<flat-con>" ipv4.method manual \
+    ipv4.addresses "$FLAT_IP,192.168.10.1/24,192.168.20.1/24,192.168.30.1/24" \
+    ipv4.gateway "$FLAT_GW" \
+    ipv4.dns "$EXISTING_DNS"
+
+sudo nmcli con up "<flat-con>"
 ```
 
 **Verify:**
 ```bash
-ip -4 addr show | grep -E "inet (192|10)"
-# Expected:
+ip -4 addr show "$DEV" | grep inet
+# Expected: your flat IP PLUS:
 # inet 192.168.10.1/24 ...
 # inet 192.168.20.1/24 ...
 # inet 192.168.30.1/24 ...
-# inet 10.0.99.1/30 ...
+
+ssh still works on the flat IP? (open a second session to be sure before continuing)
 ```
 
-### 2.2 Enable IP Forwarding
+### 2.2 Enable Forwarding, Disable Redirects
+
+Redirects would tell hosts to bypass the router — killing your ACL demo. Disable both sending (router) and accepting (hosts, Step 3).
 
 ```bash
-# Enable immediately
 sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv4.conf.all.send_redirects=0
+sudo sysctl -w net.ipv4.conf.default.send_redirects=0
 
-# Make persistent
-echo "net.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/90-ipforward.conf
+cat << 'EOF' | sudo tee /etc/sysctl.d/90-router.conf
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+EOF
 
-# Verify
 sysctl net.ipv4.ip_forward
 # Expected: net.ipv4.ip_forward = 1
 ```
 
-### 2.3 Add Static Routes to R2
+### 2.3 The "ACL" — firewalld Policy
 
-```bash
-# Route to VLAN10 via R2
-sudo nmcli con mod vlan99 +ipv4.routes "192.168.10.0/24 10.0.99.2"
+Cisco equivalent being built:
 
-# Route to VLAN20 via R2
-sudo nmcli con mod vlan99 +ipv4.routes "192.168.20.0/24 10.0.99.2"
-
-# Route to VLAN30 via R2
-sudo nmcli con mod vlan99 +ipv4.routes "192.168.30.0/24 10.0.99.2"
-
-# Apply
-sudo nmcli con down vlan99 && sudo nmcli con up vlan99
-
-# Verify
-ip route show | grep 192.168
-# Expected:
-# 192.168.10.0/24 via 10.0.99.2 dev ens6
-# 192.168.20.0/24 via 10.0.99.2 dev ens6
-# 192.168.30.0/24 via 10.0.99.2 dev ens6
+```
+! permit DMZ -> Servers tcp/80 only
+! deny    DMZ -> everything else
+! permit  all other traffic
 ```
 
-### 2.4 Configure Firewall (ACL Equivalent)
-
-On RHEL, `firewalld` rich rules act like Cisco extended ACLs.
-
 ```bash
-# Allow forwarding between VLAN10 and VLAN20 (permit)
-sudo firewall-cmd --permanent --new-zone=internal-users
-sudo firewall-cmd --permanent --zone=internal-users --add-source=192.168.10.0/24
-sudo firewall-cmd --permanent --zone=internal-users --add-forward
+sudo firewall-cmd --permanent --new-zone=lab
+sudo firewall-cmd --permanent --zone=lab --add-source=192.168.10.0/24
+sudo firewall-cmd --permanent --zone=lab --add-source=192.168.20.0/24
+sudo firewall-cmd --permanent --zone=lab --add-source=192.168.30.0/24
 
-# Block DMZ (VLAN30) from reaching Users (VLAN10) — like an ACL
-sudo firewall-cmd --permanent --new-zone=dmz-restricted
-sudo firewall-cmd --permanent --zone=dmz-restricted --add-source=192.168.30.0/24
-sudo firewall-cmd --permanent --zone=dmz-restricted --add-rich-rule='rule family=ipv4 destination address=192.168.10.0/24 reject'
+# ACL entries — priorities make evaluation order deterministic (lowest first)
+# deny DMZ -> Users (extended ACL: deny ip 192.168.30.0 0.0.0.255 192.168.10.0 0.0.0.255)
+sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-100 family=ipv4 source address=192.168.30.0/24 destination address=192.168.10.0/24 reject'
 
-# Allow DMZ to reach Servers only on port 80 (like a permit tcp any host eq 80)
-sudo firewall-cmd --permanent --zone=dmz-restricted --add-rich-rule='rule family=ipv4 destination address=192.168.20.0/24 port port=80 protocol=tcp accept'
+# permit DMZ -> Servers tcp/80 (permit tcp 192.168.30.0 0.0.0.255 192.168.20.0 0.0.0.255 eq 80)
+sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-99 family=ipv4 source address=192.168.30.0/24 destination address=192.168.20.0/24 port port=80 protocol=tcp accept'
 
-# Assign interfaces to zones
-sudo firewall-cmd --permanent --zone=internal-users --change-interface=ens3
-sudo firewall-cmd --permanent --zone=dmz-restricted --change-interface=ens5
+# deny remaining DMZ -> Servers
+sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-98 family=ipv4 source address=192.168.30.0/24 destination address=192.168.20.0/24 reject'
 
-# Enable masquerade for outbound (like NAT overload)
-sudo firewall-cmd --permanent --zone=public --add-masquerade
+# Everything else: permit (target ACCEPT = "permit ip any any" at end of ACL)
+sudo firewall-cmd --permanent --zone=lab --set-target=ACCEPT
 
 sudo firewall-cmd --reload
 ```
 
----
-
-## Step 3: Configure RHEL Router 2 (R2)
-
-R2 mirrors R1 but with .254 addresses and routes pointing back to R1.
-
+**Verify:**
 ```bash
-# VLAN10 interface
-sudo nmcli con add type ethernet ifname ens3 con-name vlan10 \
-    ipv4.method manual ipv4.addresses 192.168.10.254/24
-
-# VLAN20 interface
-sudo nmcli con add type ethernet ifname ens4 con-name vlan20 \
-    ipv4.method manual ipv4.addresses 192.168.20.254/24
-
-# VLAN30 interface
-sudo nmcli con add type ethernet ifname ens5 con-name vlan30 \
-    ipv4.method manual ipv4.addresses 192.168.30.254/24
-
-# VLAN99 transit
-sudo nmcli con add type ethernet ifname ens6 con-name vlan99 \
-    ipv4.method manual ipv4.addresses 10.0.99.2/30
-
-sudo nmcli con up vlan10 && sudo nmcli con up vlan20 && \
-sudo nmcli con up vlan30 && sudo nmcli con up vlan99
-
-# Enable forwarding
-sudo sysctl -w net.ipv4.ip_forward=1
-echo "net.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/90-ipforward.conf
-
-# Routes back to R1
-sudo nmcli con mod vlan99 +ipv4.routes "192.168.10.0/24 10.0.99.1"
-sudo nmcli con mod vlan99 +ipv4.routes "192.168.20.0/24 10.0.99.1"
-sudo nmcli con mod vlan99 +ipv4.routes "192.168.30.0/24 10.0.99.1"
-sudo nmcli con down vlan99 && sudo nmcli con up vlan99
+sudo firewall-cmd --zone=lab --list-all
+# Expected: lab zone, 3 sources, 3 rich rules in priority order, target: ACCEPT
 ```
 
 ---
 
-## Step 4: Configure End Hosts
+## Step 3: Configure the Hosts
 
-### USER01 (VLAN10)
+Run on **each host**, with its own lab IP. Each host keeps its flat IP for management and gets a lab IP + static routes to the *other* lab subnets via R1.
+
+### USER01 (192.168.10.10)
 
 ```bash
-sudo nmcli con add type ethernet ifname ens3 con-name users \
-    ipv4.method manual ipv4.addresses 192.168.10.10/24 \
-    ipv4.gateway 192.168.10.1 ipv4.dns "8.8.8.8"
+# After running Step 1 discovery on USER01:
+sudo nmcli con mod "<flat-con>" ipv4.method manual \
+    ipv4.addresses "$FLAT_IP,192.168.10.10/24" \
+    ipv4.gateway "$FLAT_GW" \
+    ipv4.dns "$EXISTING_DNS" \
+    +ipv4.routes "192.168.20.0/24 192.168.10.1" \
+    +ipv4.routes "192.168.30.0/24 192.168.10.1"
 
-sudo nmcli con up users
+sudo nmcli con up "<flat-con>"
+
+# Don't accept ICMP redirects (keeps traffic pinned to R1)
+echo "net.ipv4.conf.all.accept_redirects=0" | sudo tee /etc/sysctl.d/91-no-redirects.conf
+sudo sysctl -w net.ipv4.conf.all.accept_redirects=0
 ```
 
-### SVR01 (VLAN20)
+### SVR01 (192.168.20.10)
 
 ```bash
-sudo nmcli con add type ethernet ifname ens3 con-name servers \
-    ipv4.method manual ipv4.addresses 192.168.20.10/24 \
-    ipv4.gateway 192.168.20.1 ipv4.dns "8.8.8.8"
+sudo nmcli con mod "<flat-con>" ipv4.method manual \
+    ipv4.addresses "$FLAT_IP,192.168.20.10/24" \
+    ipv4.gateway "$FLAT_GW" \
+    ipv4.dns "$EXISTING_DNS" \
+    +ipv4.routes "192.168.10.0/24 192.168.20.1" \
+    +ipv4.routes "192.168.30.0/24 192.168.20.1"
 
-sudo nmcli con up servers
+sudo nmcli con up "<flat-con>"
+echo "net.ipv4.conf.all.accept_redirects=0" | sudo tee /etc/sysctl.d/91-no-redirects.conf
+sudo sysctl -w net.ipv4.conf.all.accept_redirects=0
+
+# Optional: web server so the DMZ->Servers:80 permit has something to hit
+sudo dnf install -y httpd && sudo systemctl enable --now httpd
+sudo firewall-cmd --permanent --add-service=http && sudo firewall-cmd --reload
 ```
 
-### DMZ01 (VLAN30)
+### DMZ01 (192.168.30.10)
 
 ```bash
-sudo nmcli con add type ethernet ifname ens3 con-name dmz \
-    ipv4.method manual ipv4.addresses 192.168.30.10/24 \
-    ipv4.gateway 192.168.30.1 ipv4.dns "8.8.8.8"
+sudo nmcli con mod "<flat-con>" ipv4.method manual \
+    ipv4.addresses "$FLAT_IP,192.168.30.10/24" \
+    ipv4.gateway "$FLAT_GW" \
+    ipv4.dns "$EXISTING_DNS" \
+    +ipv4.routes "192.168.10.0/24 192.168.30.1" \
+    +ipv4.routes "192.168.20.0/24 192.168.30.1"
 
-sudo nmcli con up dmz
+sudo nmcli con up "<flat-con>"
+echo "net.ipv4.conf.all.accept_redirects=0" | sudo tee /etc/sysctl.d/91-no-redirects.conf
+sudo sysctl -w net.ipv4.conf.all.accept_redirects=0
 ```
 
 ---
 
-## Step 5: Validation Tests
+## Step 4: Validation Tests
 
-### Test 1: Intra-VLAN Communication
+> ⚠️ Use **lab IPs only** in these tests. Pinging a VM's flat IP bypasses the router and proves nothing.
+
+### Test 1: Host Reaches Its Gateway
 
 ```bash
-# From USER01, ping its gateway (R1)
+# On USER01
 ping -c 3 192.168.10.1
+# Expected: 3 replies from 192.168.10.1
+```
+
+### Test 2: Inter-Subnet Routing (Permitted)
+
+```bash
+# On USER01
+ping -c 3 192.168.20.10
 # Expected: 3 replies
 
-# From USER01, ping R2 on same VLAN
-ping -c 3 192.168.10.254
-# Expected: 3 replies (both routers respond on VLAN10)
-```
-
-### Test 2: Inter-VLAN Routing (Permitted)
-
-```bash
-# From USER01 (VLAN10), ping SVR01 (VLAN20)
-ping -c 3 192.168.20.10
-# Expected: 3 replies — traffic routes via R1
-
-# Traceroute to see path
 tracepath 192.168.20.10
-# Expected: 192.168.10.1 → 192.168.20.10
+# Expected: 1: 192.168.10.1   2: 192.168.20.10
+# (hairpin through R1 — the inter-VLAN behavior)
 ```
 
-### Test 3: DMZ Restriction (ACL Block)
+### Test 3: ACL — DMZ Cannot Reach Users
 
 ```bash
-# From DMZ01, try to ping USER01 — should FAIL
+# On DMZ01
 ping -c 3 192.168.10.10
-# Expected: 100% packet loss (or "Destination Port Unreachable")
-
-# From DMZ01, ping SVR01 on ICMP — should FAIL
-ping -c 3 192.168.20.10
-# Expected: 100% packet loss
-
-# From DMZ01, curl SVR01 on port 80 — should SUCCEED (if httpd installed)
-curl -s http://192.168.20.10/ | head -5
-# Expected: HTML response or connection refused (if no web server), but NOT timeout
+# Expected: "Destination Port Unreachable" / "Packet filtered" — 100% loss
 ```
 
-### Test 4: Static Route Verification
+### Test 4: ACL — DMZ Reaches Servers on TCP/80 Only
 
 ```bash
-# On R1, check routing table
-ip route show
-# Expected: routes for all 3 VLANs, some direct, some via 10.0.99.2
+# On DMZ01
+ping -c 3 192.168.20.10
+# Expected: filtered/unreachable — ICMP is NOT permitted DMZ->Servers
 
-# On R2, same
+curl -s -m 5 http://192.168.20.10/ | head -3
+# Expected: HTML (or "Failed to connect" only if you skipped httpd on SVR01)
+```
+
+### Test 5: Watch the Router Work
+
+```bash
+# On R1, while DMZ01 retries Test 3
+sudo tcpdump -i "$DEV" -n host 192.168.30.10 and icmp -c 6
+# Expected: echo requests arriving AND R1's icmp admin-prohibited replies going back
+```
+
+### Test 6: Routing Table (the `show ip route` moment)
+
+```bash
+# On R1
 ip route show
-# Expected: routes for all 3 VLANs, some direct, some via 10.0.99.1
+# Expected: connected routes for all three 192.168.x.0/24 subnets + your flat routes
+```
+
+---
+
+## Optional Extension: Second Router + Static Routes
+
+Have a 5th VM? Build the classic two-router topology on the same wire:
+
+```bash
+# On R2: stack gateways as .254 plus a transit address
+sudo nmcli con mod "<flat-con>" ipv4.method manual \
+    ipv4.addresses "$FLAT_IP,192.168.10.254/24,192.168.20.254/24,10.0.99.2/30" \
+    ipv4.gateway "$FLAT_GW" ipv4.dns "$EXISTING_DNS"
+sudo nmcli con up "<flat-con>"
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# On R1: add transit address + route "half the world" via R2
+sudo nmcli con mod "<flat-con>" +ipv4.addresses "10.0.99.1/30" \
+    +ipv4.routes "192.168.30.0/24 10.0.99.2"
+sudo nmcli con up "<flat-con>"
+
+ip route show | grep 10.0.99
+# Expected on R1: 10.0.99.0/30 dev ... + 192.168.30.0/24 via 10.0.99.2
 ```
 
 ---
 
 ## CCNA Concepts Mapped
 
-| CCNA Topic | How It's Demonstrated |
-|-----------|----------------------|
-| VLANs | 3 isolated broadcast domains in Nutanix |
-| 802.1Q | Nutanix AHV handles tagging; VMs see untagged traffic |
-| Inter-VLAN routing | RHEL router with multiple VLAN interfaces |
-| Static routes | `ipv4.routes` in NetworkManager |
-| Standard ACL | `firewall-cmd --zone=... --add-source` |
-| Extended ACL | `--add-rich-rule` with destination + port |
-| Routing table | `ip route show` |
+| CCNA Topic | Where You Did It |
+|-----------|------------------|
+| Subnets / broadcast domains | 3 secondary subnets on one wire |
+| Router-on-a-stick | R1 holds .1 of all 3 subnets on one vNIC |
+| Static routes | `+ipv4.routes` on hosts and routers |
+| Extended ACL | firewalld rich rules with priorities (-100 deny, -99 permit tcp/80, -98 deny) |
+| Implicit deny | Demonstrated by flipping `--set-target` (try REJECT and watch everything die) |
+| Verification commands | `ip route`, `tracepath`, `tcpdump` ≈ `show ip route`, `traceroute`, `debug ip packet` |
 
 ---
 
@@ -340,30 +320,36 @@ ip route show
 
 | Symptom | Check |
 |---------|-------|
-| No inter-VLAN ping | `sysctl net.ipv4.ip_forward` on router |
-| Wrong interface IPs | `nmcli con show <name>` — verify `ipv4.addresses` |
-| DMZ can ping Users | Check firewalld zone assignment: `firewall-cmd --get-active-zones` |
-| Routes not loading | `nmcli con down/up` after modifying routes |
-| Nutanix network not passing traffic | Verify VLAN ID matches between Prism and VM config |
+| Lost SSH after `con mod` | You changed the flat IP. Console in, `nmcli con show "<flat-con>" \| grep ipv4` |
+| Host can't ping gateway | `ip addr show` on host — lab IP present? On R1 — all three .1 addresses present? |
+| Ping works but tracepath shows direct path | Redirects accepted. `sysctl net.ipv4.conf.all.accept_redirects` on host must be 0; `send_redirects` on R1 must be 0 |
+| DMZ can ping Users | Rich rules missing: `sudo firewall-cmd --zone=lab --list-all`. Also confirm sources are in the zone |
+| DMZ can't curl :80 either | httpd running on SVR01? `curl -m5 http://192.168.20.10/` **from SVR01 itself** first |
+| Nothing forwards at all | `sysctl net.ipv4.ip_forward` on R1 must be 1 |
 
 ---
 
 ## Cleanup
 
 ```bash
-# On routers: remove all connections
-sudo nmcli con delete vlan10 vlan20 vlan30 vlan99
+# On each host: remove the lab IP and routes
+sudo nmcli con mod "<flat-con>" -ipv4.addresses "192.168.10.10/24" \
+    -ipv4.routes "192.168.20.0/24 192.168.10.1" -ipv4.routes "192.168.30.0/24 192.168.10.1"
+sudo nmcli con up "<flat-con>"
+sudo rm -f /etc/sysctl.d/91-no-redirects.conf
 
-# On hosts: remove connection
-sudo nmcli con delete users servers dmz
-
-# In Prism: delete networks if desired
+# On R1
+sudo nmcli con mod "<flat-con>" -ipv4.addresses "192.168.10.1/24" \
+    -ipv4.addresses "192.168.20.1/24" -ipv4.addresses "192.168.30.1/24"
+sudo nmcli con up "<flat-con>"
+sudo firewall-cmd --permanent --delete-zone=lab && sudo firewall-cmd --reload
+sudo rm -f /etc/sysctl.d/90-router.conf
 ```
 
 ---
 
 ## Next Steps
 
-- Add **OSPF** or **EIGRP** between R1 and R2 using `frr` (FRRouting) package
-- Configure **DHCP relay** on R1 to forward to a central DHCP server
-- Add **NAT overload** (PAT) on R2 for outbound internet simulation
+- Flip the zone target to `REJECT` and write **permit-only** rich rules (true implicit-deny ACL behavior)
+- Install `frr` and replace static routes with **OSPF** between R1 and R2
+- Carry this topology into Project 3: put one subnet behind a WireGuard tunnel

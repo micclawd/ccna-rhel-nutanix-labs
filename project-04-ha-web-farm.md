@@ -1,184 +1,123 @@
 # Project 4: High-Availability Web Farm with Keepalived + HAProxy
 
+**No Prism admin required.** Runs on your existing VMs on the flat network. The only network-level need: **one unused IP on your flat subnet** for the virtual IP (VIP) — plus unicast VRRP so you don't depend on multicast.
+
 ## Goal
 
-Build a redundant load-balanced web service using Keepalived (VRRP) for virtual IP failover and HAProxy for traffic distribution.
+Float a virtual IP between two load balancers with VRRP, and round-robin web traffic across backend servers — the RHEL equivalent of HSRP + a Cisco ACE/F5.
 
 ## Skills Covered
 
 | CCNA | RHEL |
 |------|------|
-| First-hop redundancy (HSRP/VRRP) | `keepalived` configuration |
-| Load balancing concepts | `haproxy` configuration |
-| Server health checking | `httpd` (Apache) deployment |
-| Virtual IP (VIP) management | `systemd` service dependencies |
-| Failover testing | Log analysis (`journalctl`, `/var/log/haproxy.log`) |
+| HSRP/VRRP: virtual IP, priority, preemption | `keepalived` with unicast VRRP |
+| Load balancing algorithms | `haproxy` roundrobin / leastconn |
+| Server health checking | `option httpchk` + stats socket |
+| Failover testing | `systemctl stop` → watch VIP migrate |
+| TCP/UDP port behavior | firewalld service rules |
 
 ---
 
 ## Topology
 
 ```
-        Nutanix AHV Cluster
-    ┌─────────────────────────────────────┐
-    │                                     │
-    │   VLAN200-WebFarm                   │
-    │   192.168.200.0/24                  │
-    │        │                            │
-    │   ┌────┴────┐                       │
-    │   │  VIP    │  192.168.200.100      │
-    │   │ (floats)│                       │
-    │   └────┬────┘                       │
-    │        │                            │
-    │   ┌────┴────┐     ┌─────────┐       │
-    │   │  LB01   │     │  LB02   │       │
-    │   │ .200.11 │     │ .200.12 │       │
-    │   │ MASTER  │     │ BACKUP  │       │
-    │   └────┬────┘     └────┬────┘       │
-    │        │               │            │
-    │        └───────┬───────┘            │
-    │                │                    │
-    │           ┌────┴────┐               │
-    │           │ HAProxy │               │
-    │           │  :80    │               │
-    │           └────┬────┘               │
-    │                │                    │
-    │        ┌───────┼───────┐            │
-    │        │       │       │            │
-    │   ┌────┴──┐ ┌──┴───┐ ┌┴─────┐      │
-    │   │ WEB01 │ │ WEB02│ │WEB03│      │
-    │   │.200.21│ │.200.22│ │.200.23│    │
-    │   └───────┘ └──────┘ └─────┘      │
-    │                                     │
-    │   ┌─────────┐                       │
-    │   │ CLIENT  │                       │
-    │   │ .200.50 │                       │
-    │   └─────────┘                       │
-    │                                     │
-    └─────────────────────────────────────┘
+              Existing flat network (192.168.250.0/24 example — use YOURS)
+    ┌────────────────────────────────────────────────────┐
+    │                                                    │
+    │              VIP: <FREE_FLAT_IP>  (floats)         │
+    │                       │                            │
+    │        ┌──────────────┼──────────────┐             │
+    │        │              │              │             │
+    │   ┌────┴────┐    ┌────┴────┐         │             │
+    │   │  LB01   │    │  LB02   │         │             │
+    │   │ MASTER  │◄──►│ BACKUP  │  unicast VRRP         │
+    │   │ prio150 │    │ prio100 │         │             │
+    │   └────┬────┘    └────┬────┘         │             │
+    │        │  HAProxy :80  │             │             │
+    │        └───────┬───────┘             │             │
+    │                │                     │             │
+    │        ┌───────┴────────┐            │             │
+    │        │                │            │             │
+    │   ┌────┴────┐     ┌────┴────┐   ┌────┴────┐        │
+    │   │  WEB01  │     │  WEB02  │   │ CLIENT  │        │
+    │   │ (flat)  │     │ (flat)  │   │ (flat)  │        │
+    │   └─────────┘     └─────────┘   └─────────┘        │
+    └────────────────────────────────────────────────────┘
 ```
+
+**Minimum footprint: 2 VMs** — run LB+WEB co-located on each (LB01+WEB01, LB02+WEB02). Every skill still demonstrated. The guide shows the 4-VM layout; co-located notes inline.
 
 ---
 
 ## Prerequisites
 
-- [ ] 5 RHEL VMs: `LB01`, `LB02`, `WEB01`, `WEB02`, `WEB03`, `CLIENT`
-- [ ] All on Nutanix network `VLAN200-WebFarm` (192.168.200.0/24)
-- [ ] Packages staged: `keepalived`, `haproxy`, `httpd`
+- [ ] 2-4 existing RHEL VMs, sudo on all
+- [ ] Packages: `keepalived haproxy httpd` (install from mounted RHEL ISO repo — see Project 2 prerequisites for the ISO-repo pattern)
+- [ ] **One free IP on your flat subnet** for the VIP
+
+### Verify the VIP Candidate Is Free (MANDATORY)
+
+```bash
+DEV=$(ip route show default | awk '{print $5; exit}')
+
+VIP_CANDIDATE=<A_HIGH_IP_ON_YOUR_SUBNET>   # e.g. if flat is 172.205.2.0/24, try 172.205.2.250
+
+ping -c 2 "$VIP_CANDIDATE"
+# Expected: 100% packet loss
+
+sudo dnf install -y arping 2>/dev/null
+sudo arping -c 2 -D -I "$DEV" "$VIP_CANDIDATE"
+# Expected: 0 responses / 100% unanswered — NOBODY owns this IP
+```
+
+> If either check gets a reply, pick another address. Claiming a live IP breaks someone else's VM and VRRP will fight them for it. Record your choice: `VIP=<verified-free-ip>`.
 
 ---
 
-## Step 1: Configure Web Servers (WEB01, WEB02, WEB03)
-
-### 1.1 Install Apache
+## Step 0: Discovery (all VMs)
 
 ```bash
-sudo dnf install -y httpd
+FLAT_IP=$(ip -4 -o addr show scope global | awk 'NR==1{split($4,a,"/");print a[1]}')
+DEV=$(ip route show default | awk '{print $5; exit}')
+echo "$FLAT_IP on $DEV"
+# Record: LB01_IP, LB02_IP, WEB01_IP, WEB02_IP — used throughout
 ```
 
-### 1.2 Create Unique Test Page
+---
+
+## Step 1: Web Servers (WEB01, WEB02)
 
 On **WEB01**:
+
 ```bash
 sudo hostnamectl set-hostname web01.lab.local
-sudo nmcli con add type ethernet ifname ens3 con-name web \
-    ipv4.method manual ipv4.addresses 192.168.200.21/24
-sudo nmcli con up web
+sudo dnf install -y httpd
 
-echo "<html><body><h1>WEB01</h1><p>Server: 192.168.200.21</p></body></html>" | \
+echo "<html><body><h1>WEB01</h1><p>Served from $(hostname)</p></body></html>" | \
     sudo tee /var/www/html/index.html
 
 sudo systemctl enable --now httpd
 sudo firewall-cmd --permanent --add-service=http
 sudo firewall-cmd --reload
-```
 
-On **WEB02**:
-```bash
-sudo hostnamectl set-hostname web02.lab.local
-sudo nmcli con add type ethernet ifname ens3 con-name web \
-    ipv4.method manual ipv4.addresses 192.168.200.22/24
-sudo nmcli con up web
-
-echo "<html><body><h1>WEB02</h1><p>Server: 192.168.200.22</p></body></html>" | \
-    sudo tee /var/www/html/index.html
-
-sudo systemctl enable --now httpd
-sudo firewall-cmd --permanent --add-service=http
-sudo firewall-cmd --reload
-```
-
-On **WEB03**:
-```bash
-sudo hostnamectl set-hostname web03.lab.local
-sudo nmcli con add type ethernet ifname ens3 con-name web \
-    ipv4.method manual ipv4.addresses 192.168.200.23/24
-sudo nmcli con up web
-
-echo "<html><body><h1>WEB03</h1><p>Server: 192.168.200.23</p></body></html>" | \
-    sudo tee /var/www/html/index.html
-
-sudo systemctl enable --now httpd
-sudo firewall-cmd --permanent --add-service=http
-sudo firewall-cmd --reload
-```
-
-**Verify each web server:**
-```bash
-curl -s http://192.168.200.21/ | grep "<h1>"
+curl -s http://localhost/ | grep h1
 # Expected: <h1>WEB01</h1>
 ```
 
+On **WEB02**: identical, but `hostname web02.lab.local` and `<h1>WEB02</h1>`.
+
+> **2-VM variant:** run this web server on the LB VMs themselves; in the HAProxy config below, point the backends at the LBs' own flat IPs.
+
 ---
 
-## Step 2: Configure Load Balancer 1 (LB01 — Master)
-
-### 2.1 Network
-
-```bash
-sudo hostnamectl set-hostname lb01.lab.local
-sudo nmcli con add type ethernet ifname ens3 con-name lb \
-    ipv4.method manual ipv4.addresses 192.168.200.11/24
-sudo nmcli con up lb
-```
-
-### 2.2 Install and Configure Keepalived
-
-```bash
-sudo dnf install -y keepalived
-
-sudo tee /etc/keepalived/keepalived.conf << 'EOF'
-vrrp_instance VI_1 {
-    state MASTER
-    interface ens3
-    virtual_router_id 51
-    priority 150
-    advert_int 1
-    authentication {
-        auth_type PASS
-        auth_pass LabPass123
-    }
-    virtual_ipaddress {
-        192.168.200.100/24
-    }
-}
-EOF
-
-sudo systemctl enable --now keepalived
-
-# Verify VIP is assigned
-ip addr show ens3 | grep 192.168.200.100
-# Expected: inet 192.168.200.100/24 scope global secondary ens3
-```
-
-### 2.3 Install and Configure HAProxy
+## Step 2: HAProxy (LB01 and LB02 — identical config)
 
 ```bash
 sudo dnf install -y haproxy
 
 sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
 
-sudo tee /etc/haproxy/haproxy.cfg << 'EOF'
+sudo tee /etc/haproxy/haproxy.cfg << EOF
 global
     log         127.0.0.1 local2
     chroot      /var/lib/haproxy
@@ -195,17 +134,12 @@ defaults
     option                  httplog
     option                  dontlognull
     option http-server-close
-    option forwardfor       except 127.0.0.0/8
-    option                  redispatch
     retries                 3
     timeout http-request    10s
-    timeout queue           1m
-    timeout connect         10s
-    timeout client          1m
-    timeout server          1m
-    timeout http-keep-alive 10s
-    timeout check           10s
-    maxconn                 3000
+    timeout connect         5s
+    timeout client          30s
+    timeout server          30s
+    timeout check           5s
 
 frontend web_frontend
     bind *:80
@@ -214,205 +148,207 @@ frontend web_frontend
 backend web_backend
     balance roundrobin
     option httpchk GET /
-    http-check expect status 200
-    server web01 192.168.200.21:80 check
-    server web02 192.168.200.22:80 check
-    server web03 192.168.200.23:80 check
+    server web01 <WEB01_IP>:80 check fall 2 rise 1
+    server web02 <WEB02_IP>:80 check fall 2 rise 1
 
 listen stats
     bind *:8404
     stats enable
     stats uri /stats
-    stats refresh 30s
-    stats auth admin:LabPass123
+    stats refresh 10s
 EOF
+# Fill in WEB01_IP / WEB02_IP with the flat IPs from Step 0
+```
 
-# Enable rsyslog for HAProxy
+### SELinux + Logging + Start
+
+```bash
+# HAProxy needs to make outbound HTTP connections to backends
+sudo setsebool -P haproxy_connect_any 1
+
+# Route HAProxy logs to a file
 sudo tee /etc/rsyslog.d/49-haproxy.conf << 'EOF'
 local2.*    /var/log/haproxy.log
 EOF
-
 sudo systemctl restart rsyslog
-sudo systemctl enable --now haproxy
 
+sudo systemctl enable --now haproxy
 sudo firewall-cmd --permanent --add-service=http
 sudo firewall-cmd --permanent --add-port=8404/tcp
 sudo firewall-cmd --reload
+
+# Backends healthy?
+echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | cut -d, -f1,2,18 | grep web_backend
+# Expected: web_backend,web01,UP  and  web_backend,web02,UP
 ```
 
 ---
 
-## Step 3: Configure Load Balancer 2 (LB02 — Backup)
+## Step 3: Keepalived with Unicast VRRP
 
-### 3.1 Network
+Multicast VRRP may be filtered on a shared network. Unicast peering works everywhere.
 
-```bash
-sudo hostnamectl set-hostname lb02.lab.local
-sudo nmcli con add type ethernet ifname ens3 con-name lb \
-    ipv4.method manual ipv4.addresses 192.168.200.12/24
-sudo nmcli con up lb
-```
-
-### 3.2 Keepalived (Backup)
+### LB01 (MASTER)
 
 ```bash
 sudo dnf install -y keepalived
+sudo hostnamectl set-hostname lb01.lab.local
 
-sudo tee /etc/keepalived/keepalived.conf << 'EOF'
+sudo tee /etc/keepalived/keepalived.conf << EOF
+vrrp_instance VI_1 {
+    state MASTER
+    interface <DEV>
+    unicast_src_ip <LB01_IP>
+    unicast_peer {
+        <LB02_IP>
+    }
+    virtual_router_id 51
+    priority 150
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass LabPass1
+    }
+    virtual_ipaddress {
+        <VIP>/32
+    }
+}
+EOF
+```
+
+### LB02 (BACKUP)
+
+```bash
+sudo dnf install -y keepalived
+sudo hostnamectl set-hostname lb02.lab.local
+
+sudo tee /etc/keepalived/keepalived.conf << EOF
 vrrp_instance VI_1 {
     state BACKUP
-    interface ens3
+    interface <DEV>
+    unicast_src_ip <LB02_IP>
+    unicast_peer {
+        <LB01_IP>
+    }
     virtual_router_id 51
     priority 100
     advert_int 1
     authentication {
         auth_type PASS
-        auth_pass LabPass123
+        auth_pass LabPass1
     }
     virtual_ipaddress {
-        192.168.200.100/24
+        <VIP>/32
     }
 }
 EOF
+```
 
+> Replace `<DEV>` (from Step 0), `<LB01_IP>`, `<LB02_IP>`, `<VIP>` on each. `/32` on the VIP avoids the auto-generated subnet route — cleanest on a shared L2.
+
+### Start Both
+
+```bash
 sudo systemctl enable --now keepalived
 
-# Verify VIP is NOT here (it's on LB01)
-ip addr show ens3 | grep 192.168.200.100
-# Expected: no output (VIP only on master)
-```
+# On LB01 — VIP should be HERE
+ip addr show "$DEV" | grep "$VIP"
+# Expected: inet <VIP>/32 scope global ...
 
-### 3.3 HAProxy (Identical to LB01)
-
-Copy the exact same `haproxy.cfg` from LB01:
-
-```bash
-sudo dnf install -y haproxy
-sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
-
-# Copy from LB01 or recreate identically
-sudo tee /etc/haproxy/haproxy.cfg << 'EOF'
-[ ... same as LB01 config above ... ]
-EOF
-
-sudo systemctl restart rsyslog
-sudo systemctl enable --now haproxy
-
-sudo firewall-cmd --permanent --add-service=http
-sudo firewall-cmd --permanent --add-port=8404/tcp
-sudo firewall-cmd --reload
-```
-
----
-
-## Step 4: Configure Client
-
-```bash
-sudo hostnamectl set-hostname client.lab.local
-sudo nmcli con add type ethernet ifname ens3 con-name client \
-    ipv4.method manual ipv4.addresses 192.168.200.50/24 \
-    ipv4.gateway "" ipv4.dns ""
-sudo nmcli con up client
-```
-
----
-
-## Step 5: Validation Tests
-
-### Test 1: VIP on Master
-
-```bash
-# On LB01
-ip addr show ens3 | grep 192.168.200.100
-# Expected: inet 192.168.200.100/24
-
-# On LB02
-ip addr show ens3 | grep 192.168.200.100
+# On LB02 — should be ABSENT
+ip addr show "$DEV" | grep "$VIP"
 # Expected: no output
 ```
 
-### Test 2: Load Balancing
+---
+
+## Step 4: Validation Tests (from CLIENT, or any VM)
+
+### Test 1: Load Balancing Round-Robin
 
 ```bash
-# From CLIENT, hit the VIP multiple times
-for i in {1..9}; do
-    curl -s http://192.168.200.100/ | grep "<h1>"
-done
-
-# Expected: alternating responses
+for i in 1 2 3 4; do curl -s -m 5 "http://$VIP/" | grep h1; done
+# Expected:
 # <h1>WEB01</h1>
 # <h1>WEB02</h1>
-# <h1>WEB03</h1>
 # <h1>WEB01</h1>
-# ... etc (round-robin)
+# <h1>WEB02</h1>
 ```
 
-### Test 3: Health Check
-
-```bash
-# Check HAProxy stats
-curl -s --user admin:LabPass123 http://192.168.200.11:8404/stats
-
-# Or CLI
-sudo socat stdio /var/lib/haproxy/stats <<< "show stat"
-# Expected: all servers show status UP
-```
-
-### Test 4: Failover — Stop Apache on WEB01
+### Test 2: Health Check Ejects a Dead Server
 
 ```bash
 # On WEB01
 sudo systemctl stop httpd
 
-# From CLIENT, hit VIP again
-for i in {1..6}; do
-    curl -s http://192.168.200.100/ | grep "<h1>"
-done
+# Back on the test VM
+for i in 1 2 3 4; do curl -s -m 5 "http://$VIP/" | grep h1; done
+# Expected: only <h1>WEB02</h1> — four times
 
-# Expected: only WEB02 and WEB03 in rotation
-# <h1>WEB02</h1>
-# <h1>WEB03</h1>
-# <h1>WEB02</h1>
-# ... no WEB01
+# On LB01: HAProxy saw it die
+echo "show stat" | sudo socat stdio /var/lib/haproxy/stats | cut -d, -f1,2,18 | grep web01
+# Expected: web_backend,web01,DOWN
+
+sudo tail -5 /var/log/haproxy.log
+# Expected: "Server web_backend/web01 is DOWN"
 ```
 
-### Test 5: Failover — Stop LB01 Entirely
+Restart it and watch it rejoin: `sudo systemctl start httpd` on WEB01, re-run the loop — WEB01 returns to rotation within seconds.
+
+### Test 3: VRRP Failover (the HSRP moment)
 
 ```bash
-# On LB01
+# Terminal 1, on any VM: hammer the VIP continuously
+while true; do curl -s -m 2 "http://$VIP/" | grep h1 || echo "FAILED"; sleep 1; done
+
+# Terminal 2, on LB01: kill the master
 sudo systemctl stop keepalived
 
-# On LB02, verify VIP moved
-ip addr show ens3 | grep 192.168.200.100
-# Expected: inet 192.168.200.100/24 — now on LB02!
+# Terminal 1 expected: at most 1-3 FAILED lines, then responses continue
+# (VRRP advert_int 1s + 3 missed adverts ≈ 3s convergence — same as HSRP default timers)
 
-# From CLIENT, still works
-curl -s http://192.168.200.100/ | grep "<h1>"
-# Expected: web page loads (from remaining servers)
+# On LB02: VIP landed here
+ip addr show "$DEV" | grep "$VIP"
+# Expected: inet <VIP>/32 scope global ...
+
+# On LB02: the VRRP story in the logs
+sudo journalctl -u keepalived -n 10 --no-pager
+# Expected: "Entering MASTER STATE"
 ```
 
-### Test 6: VRRP Advertisements
+### Test 4: Preemption
 
 ```bash
-# On LB02, watch VRRP traffic
-sudo tcpdump -i ens3 -n vrrp
+# On LB01: bring the master back
+sudo systemctl start keepalived
 
-# Expected: periodic VRRP advertisements from 192.168.200.11
-# If LB01 stops, LB02 takes over after ~3 seconds
+# LB01 reclaims the VIP (priority 150 > 100)
+ip addr show "$DEV" | grep "$VIP"
+# Expected on LB01: VIP present again
+# Expected on LB02: VIP gone, journalctl shows "Entering BACKUP STATE"
+```
+
+### Test 5: Stats Page
+
+From any VM with a browser that can reach the flat network: `http://<LB01_IP>:8404/stats`
+Or browser-free:
+```bash
+curl -s "http://<LB01_IP>:8404/stats;csv" | cut -d, -f1,2,18 | column -t -s,
+# Expected: per-server UP/DOWN status table
 ```
 
 ---
 
 ## CCNA Concepts Mapped
 
-| CCNA Topic | How It's Demonstrated |
-|-----------|----------------------|
-| HSRP/VRRP | Keepalived `vrrp_instance` with virtual IP |
-| Virtual IP (VIP) | 192.168.200.100 floats between LB01 and LB02 |
-| Load balancing | HAProxy `roundrobin` algorithm |
-| Health checking | `option httpchk GET /` probes web servers |
-| Failover | Stop service → VIP moves to backup |
-| Preemption | LB01 (higher priority) reclaims VIP when restored |
+| CCNA Topic | Where You Did It |
+|-----------|------------------|
+| HSRP/VRRP virtual IP | `<VIP>` floating between LB01/LB02 |
+| Priority & preemption | `priority 150/100`, Test 4 re-election |
+| Hello/hold timers | `advert_int 1` → ~3s failover (HSRP defaults: 3s hello, 10s hold) |
+| Load balancing | HAProxy `balance roundrobin` (try `leastconn` for weighted behavior) |
+| Health tracking | `option httpchk` + `fall 2 rise 1` ≈ HSRP interface tracking |
+| Multicast vs unicast FHRP | VRRP normally multicasts 224.0.0.18 — you ran it unicast |
 
 ---
 
@@ -420,33 +356,32 @@ sudo tcpdump -i ens3 -n vrrp
 
 | Symptom | Check |
 |---------|-------|
-| VIP on both LBs | `virtual_router_id` must match; check multicast on Nutanix network |
-| VIP on neither | `systemctl status keepalived`, check `journalctl -u keepalived` |
-| HAProxy 503 | `sudo socat stdio /var/lib/haproxy/stats <<< "show stat"` — check server state |
-| No load balancing | `balance roundrobin` in backend, `check` keyword present |
-| Stats page blank | `stats enable`, `stats uri /stats`, port 8404 open in firewall |
-| Failover slow | `advert_int 1` (default 1 second), `preempt` enabled by default |
+| VIP on BOTH LBs (split brain) | Peer IPs swapped? `virtual_router_id` identical? Auth pass identical? Check `journalctl -u keepalived` on both |
+| VIP on NEITHER | Both in BACKUP? One must have higher priority. Also: `sudo tcpdump -i $DEV proto vrrp -c 4` — do adverts flow? |
+| curl to VIP times out but VIP is up | HAProxy bound on the MASTER? `ss -tlnp \| grep :80` on the VIP holder |
+| 503 from HAProxy | All backends down: `echo "show stat" \| sudo socat stdio /var/lib/haproxy/stats` |
+| Backend never comes UP | `curl -m3 http://<WEB_IP>/` **from the LB** first. SELinux: `getsebool haproxy_connect_any` must be on |
+| VIP responds on the wrong LB | Check which VM actually holds it: `ip addr \| grep $VIP` — curl goes wherever the IP lives |
 
 ---
 
 ## Cleanup
 
 ```bash
-# Stop services
-sudo systemctl stop keepalived haproxy httpd
-
-# Remove VIP if stuck
-sudo ip addr del 192.168.200.100/24 dev ens3
-
-# Disable services
-sudo systemctl disable keepalived haproxy httpd
+sudo systemctl disable --now keepalived haproxy
+# If the VIP lingers after stopping keepalived:
+sudo ip addr del "$VIP/32" dev "$DEV"
+sudo firewall-cmd --permanent --remove-port=8404/tcp && sudo firewall-cmd --reload
+sudo rm -f /etc/rsyslog.d/49-haproxy.conf && sudo systemctl restart rsyslog
+# On web servers:
+sudo systemctl disable --now httpd
 ```
 
 ---
 
 ## Next Steps
 
-- Replace **roundrobin** with **leastconn** or **source** (sticky sessions)
-- Add **SSL termination** at HAProxy with a self-signed cert
-- Configure **Keepalived** to track HAProxy process (failover if HAProxy dies, not just if LB dies)
-- Add a **second VIP** for active-active load balancing
+- `balance source` for **sticky sessions** (client IP hash — like cookie persistence)
+- Add a **third backend** and switch to `leastconn`; watch `show stat` session counts diverge
+- Track the HAProxy process in keepalived with a `vrrp_script` — VIP fails over if HAProxy itself dies, not just the box
+- Terminate TLS at HAProxy with a self-signed cert (ties into your PKI lab nicely)

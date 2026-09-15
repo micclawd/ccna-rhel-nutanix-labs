@@ -19,8 +19,6 @@ A collection of hands-on lab projects that combine **Cisco CCNA networking conce
 - No internet access (air-gapped) — all packages must be pre-staged on a golden image
 - Console access to VMs via Prism
 
-> **⚠️ No Prism admin rights?** Every project has a flat-network variant needing zero Prism changes — see [NO-PRISM-ADMIN.md](NO-PRISM-ADMIN.md) for the full adaptation guide (secondary subnets, network-namespace DHCP sandbox, unicast VRRP, dummy-interface site subnets).
-
 ## How to Use
 
 Each project is a standalone markdown guide. Start with Project 1 and work through in order, or jump to any project that matches your current study focus.

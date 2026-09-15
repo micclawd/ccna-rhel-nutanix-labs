@@ -66,8 +66,6 @@ Build a redundant load-balanced web service using Keepalived (VRRP) for virtual 
 - [ ] All on Nutanix network `VLAN200-WebFarm` (192.168.200.0/24)
 - [ ] Packages staged: `keepalived`, `haproxy`, `httpd`
 
-> **⚠️ No Prism Admin?** See [NO-PRISM-ADMIN.md](NO-PRISM-ADMIN.md) § Project 4 — works on the flat network with two mandatory changes: the VIP must be a verified-free IP on your existing subnet, and VRRP must use unicast peering (multicast may be filtered). Can collapse to 2 VMs.
-
 ---
 
 ## Step 1: Configure Web Servers (WEB01, WEB02, WEB03)

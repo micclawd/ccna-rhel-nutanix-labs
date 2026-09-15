@@ -68,8 +68,6 @@ Build a site-to-site VPN tunnel between two isolated networks using WireGuard on
   - `WAN-Transit` (10.0.0.0/24, VLAN 130)
 - [ ] WireGuard installed on both gateways
 
-> **⚠️ No Prism Admin?** See [NO-PRISM-ADMIN.md](NO-PRISM-ADMIN.md) § Project 3 — WireGuard is a pure overlay and works as-is over your existing flat network. Site subnets move to dummy interfaces; endpoints use existing VM IPs.
-
 > **Air-gapped WireGuard install:**
 > ```bash
 > # Option A: From RHEL ISO (if available)

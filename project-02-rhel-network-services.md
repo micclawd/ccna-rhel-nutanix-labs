@@ -56,8 +56,6 @@ Deploy a single RHEL VM as a centralized network services server, then configure
 - [ ] SVCS01 has static IP: 192.168.100.10/24
 - [ ] Packages staged on SVCS01: `bind`, `dhcp-server`, `chrony`, `vsftpd`
 
-> **⚠️ No Prism Admin?** See [NO-PRISM-ADMIN.md](NO-PRISM-ADMIN.md) § Project 2 — DNS/NTP/FTP run as-is on the flat network; DHCP moves into an isolated network-namespace sandbox (never run rogue DHCP on a shared network).
-
 > **Air-gapped tip:** If DNF can't reach repos, mount the RHEL ISO and use it as a local repo:
 > ```bash
 > sudo mkdir /mnt/rhel-iso

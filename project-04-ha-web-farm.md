@@ -21,7 +21,7 @@ Float a virtual IP between two load balancers with VRRP, and round-robin web tra
 ## Topology
 
 ```
-              Existing flat network (192.168.250.0/24 example — use YOURS)
+              Existing flat network (whatever yours is — VIP lives here)
     ┌────────────────────────────────────────────────────┐
     │                                                    │
     │              VIP: <FREE_FLAT_IP>  (floats)         │

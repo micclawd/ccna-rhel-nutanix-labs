@@ -34,7 +34,7 @@ ip -4 addr show scope global
 
 - **`<flat-con>`** — your existing NetworkManager connection name (from the command above)
 - **Flat IP** — the IP your VM already has. Guides never change it; lab addresses are **added alongside**
-- **Lab subnets** — 192.168.10.0/24, 192.168.20.0/24, 192.168.30.0/24 (Project 1) and similar. These are *secondary* addresses riding the same wire. If any clash with your flat network, shift them (e.g. 10.10.0.0/24, 10.20.0.0/24) — the guides tell you where
+- **Lab subnets** — 10.230.10.0/24, 10.230.20.0/24, 10.230.30.0/24 (Project 1) and similar. These are *secondary* addresses riding the same wire. If any clash with your flat network, shift them (e.g. 10.231.10.0/24, 10.231.20.0/24) — the guides tell you where
 
 ## Shared-Network Etiquette (Read Once, Follow Always)
 

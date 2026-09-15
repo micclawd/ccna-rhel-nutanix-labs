@@ -30,18 +30,18 @@ Tunnel a private site subnet between two RHEL gateways over the flat network, wi
     │   ┌────┴─────┐                       ┌─────┴───┐ │
     │   │ dummy0   │                       │ dummy0  │ │
     │   │ Site-A   │                       │ Site-B  │ │
-    │   │192.168.  │  ← routed via wg0 →   │192.168. │ │
+    │   │10.230.  │  ← routed via wg0 →   │10.230. │ │
     │   │10.1/24   │                       │20.1/24  │ │
     │   └──────────┘                       └─────────┘ │
     │                                                  │
-    │   wg0: 10.0.100.1/30                   wg0: 10.0.100.2/30 │
+    │   wg0: 10.230.100.1/30                   wg0: 10.230.100.2/30 │
     │                                                  │
     └──────────────────────────────────────────────────┘
 ```
 
 - **Flat IPs** = underlay endpoints (already exist, untouched)
-- **wg0 / 10.0.100.0/30** = the tunnel itself
-- **dummy0 / 192.168.x.0/24** = private "site LANs" that only exist on each gateway — reachable from the other side *only* through the tunnel
+- **wg0 / 10.230.100.0/30** = the tunnel itself
+- **dummy0 / 10.230.x.0/24** = private "site LANs" that only exist on each gateway — reachable from the other side *only* through the tunnel
 
 ---
 
@@ -110,13 +110,13 @@ sudo cat public.key
 sudo tee /etc/wireguard/wg0.conf << EOF
 [Interface]
 PrivateKey = $(sudo cat /etc/wireguard/private.key)
-Address = 10.0.100.1/30
+Address = 10.230.100.1/30
 ListenPort = 51820
 
 [Peer]
 # GW-B's public key — PASTE after configuring GW-B (Step 2.1)
 PublicKey = PASTE_GWB_PUBLIC_KEY_HERE
-AllowedIPs = 10.0.100.0/30, 192.168.20.0/24
+AllowedIPs = 10.230.100.0/30, 10.230.20.0/24
 Endpoint = <GWB_FLAT_IP>:51820
 PersistentKeepalive = 25
 EOF
@@ -130,11 +130,11 @@ sudo chmod 600 /etc/wireguard/wg0.conf
 
 ```bash
 sudo nmcli con add type dummy ifname dummy0 \
-    ipv4.method manual ipv4.addresses 192.168.10.1/24
+    ipv4.method manual ipv4.addresses 10.230.10.1/24
 sudo nmcli con up dummy0
 
 ip addr show dummy0
-# Expected: inet 192.168.10.1/24
+# Expected: inet 10.230.10.1/24
 ```
 
 ### 1.4 Forwarding + NAT + Firewall
@@ -177,12 +177,12 @@ sudo cat public.key
 sudo tee /etc/wireguard/wg0.conf << EOF
 [Interface]
 PrivateKey = $(sudo cat /etc/wireguard/private.key)
-Address = 10.0.100.2/30
+Address = 10.230.100.2/30
 ListenPort = 51820
 
 [Peer]
 PublicKey = <GWA_PUBLIC_KEY_FROM_STEP_1.1>
-AllowedIPs = 10.0.100.0/30, 192.168.10.0/24
+AllowedIPs = 10.230.100.0/30, 10.230.10.0/24
 Endpoint = <GWA_FLAT_IP>:51820
 PersistentKeepalive = 25
 EOF
@@ -190,7 +190,7 @@ sudo chmod 600 /etc/wireguard/wg0.conf
 
 # 2.3 Site subnet
 sudo nmcli con add type dummy ifname dummy0 \
-    ipv4.method manual ipv4.addresses 192.168.20.1/24
+    ipv4.method manual ipv4.addresses 10.230.20.1/24
 sudo nmcli con up dummy0
 
 # 2.4 Forwarding + NAT + firewall
@@ -225,7 +225,7 @@ interface: wg0
 
 peer: <other side's key>
   endpoint: <other side's flat IP>:51820
-  allowed ips: 10.0.100.0/30, 192.168.x.0/24
+  allowed ips: 10.230.100.0/30, 10.230.x.0/24
   latest handshake: 12 seconds ago        ← tunnel is UP
   transfer: 148 B received, 180 B sent
 ```
@@ -238,7 +238,7 @@ peer: <other side's key>
 
 ```bash
 # On GW-A
-ping -c 3 10.0.100.2
+ping -c 3 10.230.100.2
 # Expected: 3 replies — this ONLY works through wg0
 ```
 
@@ -246,18 +246,18 @@ ping -c 3 10.0.100.2
 
 ```bash
 # On GW-A: reach Site-B's private subnet through the tunnel
-ping -c 3 192.168.20.1
+ping -c 3 10.230.20.1
 # Expected: 3 replies
 
-tracepath 192.168.20.1
-# Expected: 1: 10.0.100.2   2: 192.168.20.1
+tracepath 10.230.20.1
+# Expected: 1: 10.230.100.2   2: 10.230.20.1
 # (NOT via the flat default gateway — that's the routing win)
 ```
 
 ### Test 3: Proof of Encryption
 
 ```bash
-# On GW-A, capture the underlay while pinging 192.168.20.1 from another shell
+# On GW-A, capture the underlay while pinging 10.230.20.1 from another shell
 sudo tcpdump -i <flat-dev> -n udp port 51820 -c 4
 # Expected: UDP packets between the two flat IPs — opaque encrypted payload.
 # You will NOT see the inner ICMP. That's the CCNA "tunnel encapsulation" point.
@@ -267,16 +267,16 @@ sudo tcpdump -i <flat-dev> -n udp port 51820 -c 4
 
 ```bash
 # On GW-A: ping a third flat-network VM, sourced from the site subnet
-ping -I 192.168.10.1 -c 4 <SOME_OTHER_FLAT_VM_IP>
-# Expected: replies — the target sees GW-A's flat IP, not 192.168.10.1
+ping -I 10.230.10.1 -c 4 <SOME_OTHER_FLAT_VM_IP>
+# Expected: replies — the target sees GW-A's flat IP, not 10.230.10.1
 
 # NAT counters climbing:
 sudo iptables -t nat -L POSTROUTING -v -n
 # Expected: pkts/bytes incrementing on the MASQUERADE rule
 
 # Live translations:
-sudo cat /proc/net/nf_conntrack | grep 192.168.10.1 | head -3
-# Expected: conntrack entries showing 192.168.10.1 → GW-A flat IP rewrite
+sudo cat /proc/net/nf_conntrack | grep 10.230.10.1 | head -3
+# Expected: conntrack entries showing 10.230.10.1 → GW-A flat IP rewrite
 ```
 
 ### Test 5: Split Tunneling Behavior
@@ -302,16 +302,16 @@ FLAT_IP=$(ip -4 -o addr show dev "$DEV" scope global | awk 'NR==1{print $4}')
 nmcli -f NAME,DEVICE con show --active
 
 sudo nmcli con mod "<flat-con>" ipv4.method manual \
-    ipv4.addresses "$FLAT_IP,192.168.10.10/24" \
+    ipv4.addresses "$FLAT_IP,10.230.10.10/24" \
     ipv4.gateway "$(ip route show default | awk '{print $3; exit}')" \
-    +ipv4.routes "192.168.20.0/24 192.168.10.1"
+    +ipv4.routes "10.230.20.0/24 10.230.10.1"
 sudo nmcli con up "<flat-con>"
 
 echo "net.ipv4.conf.all.accept_redirects=0" | sudo tee /etc/sysctl.d/91-no-redirects.conf
 sudo sysctl -w net.ipv4.conf.all.accept_redirects=0
 
 # Now the real test — CLIENT-A reaches Site-B across the tunnel:
-ping -c 3 192.168.20.1
+ping -c 3 10.230.20.1
 # Expected: replies. Path: CLIENT-A → GW-A → wg0 → GW-B → dummy0
 ```
 
@@ -336,9 +336,9 @@ ping -c 3 192.168.20.1
 |---------|-------|
 | No handshake | Keys swapped correctly? `sudo wg show` on both sides — each side's peer key must be the OTHER side's public key. Endpoint IPs reachable? `ping <peer-flat-ip>` |
 | Handshake OK, can't ping site subnet | `AllowedIPs` on the *sending* side must include the remote site subnet; `ip_forward=1` on both |
-| Site subnet ping dies | dummy0 up? `ip addr show dummy0`. Route exists? `ip route \| grep 192.168` — should show via wg0 |
+| Site subnet ping dies | dummy0 up? `ip addr show dummy0`. Route exists? `ip route \| grep 10.230` — should show via wg0 |
 | wg-quick fails at boot | `journalctl -u wg-quick@wg0 -n 30` — usually a config typo |
-| NAT counter stays 0 | Traffic must EXIT the flat interface from a 192.168.x source; check `firewall-cmd --get-active-zones` |
+| NAT counter stays 0 | Traffic must EXIT the flat interface from a 10.230.x source; check `firewall-cmd --get-active-zones` |
 
 ---
 
@@ -360,4 +360,4 @@ sudo rm -f /etc/wireguard/wg0.conf /etc/wireguard/*.key /etc/sysctl.d/90-ipforwa
 
 - **Hub-and-spoke:** add GW-C with its own site subnet; GW-A becomes the hub
 - **Compare with OpenVPN** (`openvpn` package) — same topology, SSL/TLS instead of WireGuard
-- **Dynamic routing over the tunnel:** install `frr`, run OSPF across 10.0.100.0/30
+- **Dynamic routing over the tunnel:** install `frr`, run OSPF across 10.230.100.0/30

@@ -35,7 +35,7 @@ Turn one RHEL VM into a full network-services server — DNS, NTP, FTP live on t
     │  │ ┌───────┐ │   └───────────┘     │
     │  │ │netns  │ │                     │
     │  │ │DHCP   │ │  (isolated inside   │
-    │  │ │10.77.0│ │   SVCS01 — never    │
+    │  │ │10.230.│ │   SVCS01 — never    │
     │  │ └───────┘ │   touches the wire) │
     │  └───────────┘                     │
     └────────────────────────────────────┘
@@ -291,12 +291,12 @@ sudo ip link set veth1 netns dhcpclient
 sudo ip netns exec dhcpserver ip link set lo up
 sudo ip netns exec dhcpclient ip link set lo up
 
-sudo ip netns exec dhcpserver ip addr add 10.77.0.1/24 dev veth0
+sudo ip netns exec dhcpserver ip addr add 10.230.77.1/24 dev veth0
 sudo ip netns exec dhcpserver ip link set veth0 up
 sudo ip netns exec dhcpclient ip link set veth1 up
 
 sudo ip netns exec dhcpserver ip addr show veth0
-# Expected: inet 10.77.0.1/24
+# Expected: inet 10.230.77.1/24
 ```
 
 ### 5.2 Server Config
@@ -310,11 +310,11 @@ default-lease-time 3600;
 max-lease-time 7200;
 
 option domain-name "sandbox.local";
-option domain-name-servers 10.77.0.1;
+option domain-name-servers 10.230.77.1;
 
-subnet 10.77.0.0 netmask 255.255.255.0 {
-    range 10.77.0.100 10.77.0.200;
-    option routers 10.77.0.1;
+subnet 10.230.77.0 netmask 255.255.255.0 {
+    range 10.230.77.100 10.230.77.200;
+    option routers 10.230.77.1;
 }
 EOF
 
@@ -340,7 +340,7 @@ sudo ip netns exec dhcpclient dhclient -v veth1
 **Shell 1 expected output — the full CCNA DORA lesson:**
 ```
 ... DHCP Discover ... from 0.0.0.0.bootpc > 255.255.255.255.bootps
-... DHCP Offer ... 10.77.0.100
+... DHCP Offer ... 10.230.77.100
 ... DHCP Request ...
 ... DHCP Ack ...
 ```
@@ -348,12 +348,12 @@ sudo ip netns exec dhcpclient dhclient -v veth1
 **Verify the lease:**
 ```bash
 sudo ip netns exec dhcpclient ip addr show veth1
-# Expected: inet 10.77.0.100/24 (or anything in .100-.200)
+# Expected: inet 10.230.77.100/24 (or anything in .100-.200)
 
 sudo cat /var/lib/dhcpd/dhcpd-ns.leases
 # Expected: lease block with IP, client MAC, start/end times
 
-sudo ip netns exec dhcpclient ping -c 3 10.77.0.1
+sudo ip netns exec dhcpclient ping -c 3 10.230.77.1
 # Expected: 3 replies
 ```
 

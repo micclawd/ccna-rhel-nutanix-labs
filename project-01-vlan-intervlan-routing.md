@@ -26,9 +26,9 @@ You can't create Nutanix VLAN networks, so instead each "VLAN" is a **separate I
               Existing flat network (one wire)
     ┌───────────────────────────────────────────────────┐
     │                                                   │
-    │   "Users" 192.168.10.0/24   (secondary IPs)       │
-    │   "Servers" 192.168.20.0/24                       │
-    │   "DMZ"    192.168.30.0/24                        │
+    │   "Users" 10.230.10.0/24   (secondary IPs)       │
+    │   "Servers" 10.230.20.0/24                       │
+    │   "DMZ"    10.230.30.0/24                        │
     │                                                   │
     │   ┌────────┐    ┌────────┐    ┌────────┐          │
     │   │ USER01 │    │ SVR01  │    │ DMZ01  │          │
@@ -52,7 +52,7 @@ You can't create Nutanix VLAN networks, so instead each "VLAN" is a **separate I
 
 - [ ] 4 existing RHEL VMs (R1, USER01, SVR01, DMZ01) — or 2 VMs minimum (R1 + one host; add others later)
 - [ ] sudo on all of them
-- [ ] Your flat network does **not** already use 192.168.10.0/24, 192.168.20.0/24, or 192.168.30.0/24 — if it does, substitute e.g. 10.10.0.0/24, 10.20.0.0/24, 10.30.0.0/24 everywhere below
+- [ ] Your flat network does **not** already use 10.230.10.0/24, 10.230.20.0/24, or 10.230.30.0/24 (these guides deliberately use the uncommon `10.230.x` block to avoid the usual 172.x / 192.168.x corporate ranges). If `10.230.x` is somehow also taken, pick another /24 block (e.g. 10.231.x) and shift everywhere below
 - [ ] Firewalld running: `systemctl status firewalld`
 
 ---
@@ -84,7 +84,7 @@ We convert the connection from DHCP to manual, keeping the flat IP (management) 
 
 ```bash
 sudo nmcli con mod "<flat-con>" ipv4.method manual \
-    ipv4.addresses "$FLAT_IP,192.168.10.1/24,192.168.20.1/24,192.168.30.1/24" \
+    ipv4.addresses "$FLAT_IP,10.230.10.1/24,10.230.20.1/24,10.230.30.1/24" \
     ipv4.gateway "$FLAT_GW" \
     ipv4.dns "$EXISTING_DNS"
 
@@ -95,9 +95,9 @@ sudo nmcli con up "<flat-con>"
 ```bash
 ip -4 addr show "$DEV" | grep inet
 # Expected: your flat IP PLUS:
-# inet 192.168.10.1/24 ...
-# inet 192.168.20.1/24 ...
-# inet 192.168.30.1/24 ...
+# inet 10.230.10.1/24 ...
+# inet 10.230.20.1/24 ...
+# inet 10.230.30.1/24 ...
 
 ssh still works on the flat IP? (open a second session to be sure before continuing)
 ```
@@ -133,19 +133,19 @@ Cisco equivalent being built:
 
 ```bash
 sudo firewall-cmd --permanent --new-zone=lab
-sudo firewall-cmd --permanent --zone=lab --add-source=192.168.10.0/24
-sudo firewall-cmd --permanent --zone=lab --add-source=192.168.20.0/24
-sudo firewall-cmd --permanent --zone=lab --add-source=192.168.30.0/24
+sudo firewall-cmd --permanent --zone=lab --add-source=10.230.10.0/24
+sudo firewall-cmd --permanent --zone=lab --add-source=10.230.20.0/24
+sudo firewall-cmd --permanent --zone=lab --add-source=10.230.30.0/24
 
 # ACL entries — priorities make evaluation order deterministic (lowest first)
-# deny DMZ -> Users (extended ACL: deny ip 192.168.30.0 0.0.0.255 192.168.10.0 0.0.0.255)
-sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-100 family=ipv4 source address=192.168.30.0/24 destination address=192.168.10.0/24 reject'
+# deny DMZ -> Users (extended ACL: deny ip 10.230.30.0 0.0.0.255 10.230.10.0 0.0.0.255)
+sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-100 family=ipv4 source address=10.230.30.0/24 destination address=10.230.10.0/24 reject'
 
-# permit DMZ -> Servers tcp/80 (permit tcp 192.168.30.0 0.0.0.255 192.168.20.0 0.0.0.255 eq 80)
-sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-99 family=ipv4 source address=192.168.30.0/24 destination address=192.168.20.0/24 port port=80 protocol=tcp accept'
+# permit DMZ -> Servers tcp/80 (permit tcp 10.230.30.0 0.0.0.255 10.230.20.0 0.0.0.255 eq 80)
+sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-99 family=ipv4 source address=10.230.30.0/24 destination address=10.230.20.0/24 port port=80 protocol=tcp accept'
 
 # deny remaining DMZ -> Servers
-sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-98 family=ipv4 source address=192.168.30.0/24 destination address=192.168.20.0/24 reject'
+sudo firewall-cmd --permanent --zone=lab --add-rich-rule='rule priority=-98 family=ipv4 source address=10.230.30.0/24 destination address=10.230.20.0/24 reject'
 
 # Everything else: permit (target ACCEPT = "permit ip any any" at end of ACL)
 sudo firewall-cmd --permanent --zone=lab --set-target=ACCEPT
@@ -165,16 +165,16 @@ sudo firewall-cmd --zone=lab --list-all
 
 Run on **each host**, with its own lab IP. Each host keeps its flat IP for management and gets a lab IP + static routes to the *other* lab subnets via R1.
 
-### USER01 (192.168.10.10)
+### USER01 (10.230.10.10)
 
 ```bash
 # After running Step 1 discovery on USER01:
 sudo nmcli con mod "<flat-con>" ipv4.method manual \
-    ipv4.addresses "$FLAT_IP,192.168.10.10/24" \
+    ipv4.addresses "$FLAT_IP,10.230.10.10/24" \
     ipv4.gateway "$FLAT_GW" \
     ipv4.dns "$EXISTING_DNS" \
-    +ipv4.routes "192.168.20.0/24 192.168.10.1" \
-    +ipv4.routes "192.168.30.0/24 192.168.10.1"
+    +ipv4.routes "10.230.20.0/24 10.230.10.1" \
+    +ipv4.routes "10.230.30.0/24 10.230.10.1"
 
 sudo nmcli con up "<flat-con>"
 
@@ -183,15 +183,15 @@ echo "net.ipv4.conf.all.accept_redirects=0" | sudo tee /etc/sysctl.d/91-no-redir
 sudo sysctl -w net.ipv4.conf.all.accept_redirects=0
 ```
 
-### SVR01 (192.168.20.10)
+### SVR01 (10.230.20.10)
 
 ```bash
 sudo nmcli con mod "<flat-con>" ipv4.method manual \
-    ipv4.addresses "$FLAT_IP,192.168.20.10/24" \
+    ipv4.addresses "$FLAT_IP,10.230.20.10/24" \
     ipv4.gateway "$FLAT_GW" \
     ipv4.dns "$EXISTING_DNS" \
-    +ipv4.routes "192.168.10.0/24 192.168.20.1" \
-    +ipv4.routes "192.168.30.0/24 192.168.20.1"
+    +ipv4.routes "10.230.10.0/24 10.230.20.1" \
+    +ipv4.routes "10.230.30.0/24 10.230.20.1"
 
 sudo nmcli con up "<flat-con>"
 echo "net.ipv4.conf.all.accept_redirects=0" | sudo tee /etc/sysctl.d/91-no-redirects.conf
@@ -202,15 +202,15 @@ sudo dnf install -y httpd && sudo systemctl enable --now httpd
 sudo firewall-cmd --permanent --add-service=http && sudo firewall-cmd --reload
 ```
 
-### DMZ01 (192.168.30.10)
+### DMZ01 (10.230.30.10)
 
 ```bash
 sudo nmcli con mod "<flat-con>" ipv4.method manual \
-    ipv4.addresses "$FLAT_IP,192.168.30.10/24" \
+    ipv4.addresses "$FLAT_IP,10.230.30.10/24" \
     ipv4.gateway "$FLAT_GW" \
     ipv4.dns "$EXISTING_DNS" \
-    +ipv4.routes "192.168.10.0/24 192.168.30.1" \
-    +ipv4.routes "192.168.20.0/24 192.168.30.1"
+    +ipv4.routes "10.230.10.0/24 10.230.30.1" \
+    +ipv4.routes "10.230.20.0/24 10.230.30.1"
 
 sudo nmcli con up "<flat-con>"
 echo "net.ipv4.conf.all.accept_redirects=0" | sudo tee /etc/sysctl.d/91-no-redirects.conf
@@ -227,19 +227,19 @@ sudo sysctl -w net.ipv4.conf.all.accept_redirects=0
 
 ```bash
 # On USER01
-ping -c 3 192.168.10.1
-# Expected: 3 replies from 192.168.10.1
+ping -c 3 10.230.10.1
+# Expected: 3 replies from 10.230.10.1
 ```
 
 ### Test 2: Inter-Subnet Routing (Permitted)
 
 ```bash
 # On USER01
-ping -c 3 192.168.20.10
+ping -c 3 10.230.20.10
 # Expected: 3 replies
 
-tracepath 192.168.20.10
-# Expected: 1: 192.168.10.1   2: 192.168.20.10
+tracepath 10.230.20.10
+# Expected: 1: 10.230.10.1   2: 10.230.20.10
 # (hairpin through R1 — the inter-VLAN behavior)
 ```
 
@@ -247,7 +247,7 @@ tracepath 192.168.20.10
 
 ```bash
 # On DMZ01
-ping -c 3 192.168.10.10
+ping -c 3 10.230.10.10
 # Expected: "Destination Port Unreachable" / "Packet filtered" — 100% loss
 ```
 
@@ -255,10 +255,10 @@ ping -c 3 192.168.10.10
 
 ```bash
 # On DMZ01
-ping -c 3 192.168.20.10
+ping -c 3 10.230.20.10
 # Expected: filtered/unreachable — ICMP is NOT permitted DMZ->Servers
 
-curl -s -m 5 http://192.168.20.10/ | head -3
+curl -s -m 5 http://10.230.20.10/ | head -3
 # Expected: HTML (or "Failed to connect" only if you skipped httpd on SVR01)
 ```
 
@@ -266,7 +266,7 @@ curl -s -m 5 http://192.168.20.10/ | head -3
 
 ```bash
 # On R1, while DMZ01 retries Test 3
-sudo tcpdump -i "$DEV" -n host 192.168.30.10 and icmp -c 6
+sudo tcpdump -i "$DEV" -n host 10.230.30.10 and icmp -c 6
 # Expected: echo requests arriving AND R1's icmp admin-prohibited replies going back
 ```
 
@@ -275,7 +275,7 @@ sudo tcpdump -i "$DEV" -n host 192.168.30.10 and icmp -c 6
 ```bash
 # On R1
 ip route show
-# Expected: connected routes for all three 192.168.x.0/24 subnets + your flat routes
+# Expected: connected routes for all three 10.230.x.0/24 subnets + your flat routes
 ```
 
 ---
@@ -287,18 +287,18 @@ Have a 5th VM? Build the classic two-router topology on the same wire:
 ```bash
 # On R2: stack gateways as .254 plus a transit address
 sudo nmcli con mod "<flat-con>" ipv4.method manual \
-    ipv4.addresses "$FLAT_IP,192.168.10.254/24,192.168.20.254/24,10.0.99.2/30" \
+    ipv4.addresses "$FLAT_IP,10.230.10.254/24,10.230.20.254/24,10.230.99.2/30" \
     ipv4.gateway "$FLAT_GW" ipv4.dns "$EXISTING_DNS"
 sudo nmcli con up "<flat-con>"
 sudo sysctl -w net.ipv4.ip_forward=1
 
 # On R1: add transit address + route "half the world" via R2
-sudo nmcli con mod "<flat-con>" +ipv4.addresses "10.0.99.1/30" \
-    +ipv4.routes "192.168.30.0/24 10.0.99.2"
+sudo nmcli con mod "<flat-con>" +ipv4.addresses "10.230.99.1/30" \
+    +ipv4.routes "10.230.30.0/24 10.230.99.2"
 sudo nmcli con up "<flat-con>"
 
-ip route show | grep 10.0.99
-# Expected on R1: 10.0.99.0/30 dev ... + 192.168.30.0/24 via 10.0.99.2
+ip route show | grep 10.230.99
+# Expected on R1: 10.230.99.0/30 dev ... + 10.230.30.0/24 via 10.230.99.2
 ```
 
 ---
@@ -324,7 +324,7 @@ ip route show | grep 10.0.99
 | Host can't ping gateway | `ip addr show` on host — lab IP present? On R1 — all three .1 addresses present? |
 | Ping works but tracepath shows direct path | Redirects accepted. `sysctl net.ipv4.conf.all.accept_redirects` on host must be 0; `send_redirects` on R1 must be 0 |
 | DMZ can ping Users | Rich rules missing: `sudo firewall-cmd --zone=lab --list-all`. Also confirm sources are in the zone |
-| DMZ can't curl :80 either | httpd running on SVR01? `curl -m5 http://192.168.20.10/` **from SVR01 itself** first |
+| DMZ can't curl :80 either | httpd running on SVR01? `curl -m5 http://10.230.20.10/` **from SVR01 itself** first |
 | Nothing forwards at all | `sysctl net.ipv4.ip_forward` on R1 must be 1 |
 
 ---
@@ -333,14 +333,14 @@ ip route show | grep 10.0.99
 
 ```bash
 # On each host: remove the lab IP and routes
-sudo nmcli con mod "<flat-con>" -ipv4.addresses "192.168.10.10/24" \
-    -ipv4.routes "192.168.20.0/24 192.168.10.1" -ipv4.routes "192.168.30.0/24 192.168.10.1"
+sudo nmcli con mod "<flat-con>" -ipv4.addresses "10.230.10.10/24" \
+    -ipv4.routes "10.230.20.0/24 10.230.10.1" -ipv4.routes "10.230.30.0/24 10.230.10.1"
 sudo nmcli con up "<flat-con>"
 sudo rm -f /etc/sysctl.d/91-no-redirects.conf
 
 # On R1
-sudo nmcli con mod "<flat-con>" -ipv4.addresses "192.168.10.1/24" \
-    -ipv4.addresses "192.168.20.1/24" -ipv4.addresses "192.168.30.1/24"
+sudo nmcli con mod "<flat-con>" -ipv4.addresses "10.230.10.1/24" \
+    -ipv4.addresses "10.230.20.1/24" -ipv4.addresses "10.230.30.1/24"
 sudo nmcli con up "<flat-con>"
 sudo firewall-cmd --permanent --delete-zone=lab && sudo firewall-cmd --reload
 sudo rm -f /etc/sysctl.d/90-router.conf
